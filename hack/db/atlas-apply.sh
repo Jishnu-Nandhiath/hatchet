@@ -25,44 +25,42 @@ attempt_psql_connection() {
   return $?
 }
 
-# Check if sslmode is set in the DATABASE_URL
-if [[ ! "$DATABASE_URL" =~ sslmode ]]; then
-  # Attempt a secure psql connection first if sslmode is not set
-  SECURE_DB_URL="${DATABASE_URL}?sslmode=require"
-  attempt_psql_connection "$SECURE_DB_URL"
-  if [ $? -ne 0 ]; then
-    # If secure connection fails, use sslmode=disable
-    echo "Secure connection failed. Using sslmode=disable"
-
-    DATABASE_URL="${DATABASE_URL}?sslmode=disable"
-  else
-    DATABASE_URL="$SECURE_DB_URL"
-  fi
+# Check if sslmode is set in the DATABASE_URL using grep instead of [[
+if ! echo "$DATABASE_URL" | grep -q "sslmode"; then
+  # Try with sslmode=disable first since we're connecting to localhost
+  DATABASE_URL="${DATABASE_URL}?sslmode=disable"
 fi
 
 echo "DATABASE_URL: $DATABASE_URL"
-# Check for prisma migrations
+
+# Check for prisma migrations with better error handling
 MIGRATION_NAME=$(psql "$DATABASE_URL" -t -c "SELECT migration_name FROM _prisma_migrations ORDER BY started_at DESC LIMIT 1;" 2>/dev/null | xargs)
-MIGRATION_NAME=$(echo $MIGRATION_NAME | cut -d'_' -f1)
+MIGRATION_STATUS=$?
 
-echo "Migration name: $MIGRATION_NAME"
-
-if [ $? -eq 0 ] && [ -n "$MIGRATION_NAME" ]; then
-  echo "Using existing prisma migration: $MIGRATION_NAME"
-
+if [ $MIGRATION_STATUS -ne 0 ]; then
+  echo "Error checking migrations. Trying to apply fresh migrations..."
   atlas migrate apply \
     --url "$DATABASE_URL" \
-    --baseline "$MIGRATION_NAME" \
     --dir "file://sql/migrations"
 else
-  echo "No prisma migration found. Applying migrations via atlas..."
+  MIGRATION_NAME=$(echo "$MIGRATION_NAME" | cut -d'_' -f1)
+  echo "Migration name: $MIGRATION_NAME"
 
-  atlas migrate apply \
-    --url "$DATABASE_URL" \
-    --dir "file://sql/migrations"
+  if [ -n "$MIGRATION_NAME" ]; then
+    echo "Using existing prisma migration: $MIGRATION_NAME"
+    atlas migrate apply \
+      --url "$DATABASE_URL" \
+      --baseline "$MIGRATION_NAME" \
+      --dir "file://sql/migrations"
+  else
+    echo "No prisma migration found. Applying migrations via atlas..."
+    atlas migrate apply \
+      --url "$DATABASE_URL" \
+      --dir "file://sql/migrations"
+  fi
 fi
 
-# if either of the above commands failed, exit with an error
+# Check final status
 if [ $? -ne 0 ]; then
   echo "Migration failed. Exiting..."
   exit 1
